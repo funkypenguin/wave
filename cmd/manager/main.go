@@ -17,93 +17,123 @@ limitations under the License.
 package main
 
 import (
-	goflag "flag"
+	"flag"
 	"fmt"
 	"os"
 	"runtime"
 	"time"
 
-	"github.com/go-logr/glogr"
-	flag "github.com/spf13/pflag"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+
 	"github.com/wave-k8s/wave/pkg/apis"
+	"github.com/wave-k8s/wave/pkg/core"
+
 	"github.com/wave-k8s/wave/pkg/controller"
-	"github.com/wave-k8s/wave/pkg/webhook"
+	"github.com/wave-k8s/wave/pkg/controller/daemonset"
+	"github.com/wave-k8s/wave/pkg/controller/deployment"
+	"github.com/wave-k8s/wave/pkg/controller/statefulset"
+	k8swebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
+
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
-	"sigs.k8s.io/controller-runtime/pkg/runtime/signals"
+	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 )
 
 var (
 	leaderElection          = flag.Bool("leader-election", false, "Should the controller use leader election")
 	leaderElectionID        = flag.String("leader-election-id", "", "Name of the configmap used by the leader election system")
 	leaderElectionNamespace = flag.String("leader-election-namespace", "", "Namespace for the configmap used by the leader election system")
-	syncPeriod              = flag.Duration("sync-period", 5*time.Minute, "Reconcile sync period")
+	syncPeriod              = flag.Duration("sync-period", 10*time.Hour, "Reconcile sync period")
 	showVersion             = flag.Bool("version", false, "Show version and exit")
+	enableWebhooks          = flag.Bool("enable-webhooks", false, "Enable webhooks")
+	namespaces              = flag.String("namespaces", "", "Comma-separated list of namespaces to watch. Defaults to all namespaces.")
+	setupLog                = ctrl.Log.WithName("setup")
 )
 
 func main() {
-	// Setup flags
-	goflag.Lookup("logtostderr").Value.Set("true")
-	flag.CommandLine.AddGoFlagSet(goflag.CommandLine)
+	opts := zap.Options{
+		Development: true,
+	}
+	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	if *showVersion {
 		fmt.Printf("wave %s (built with %s)\n", VERSION, runtime.Version())
 		return
 	}
 
-	logf.SetLogger(glogr.New())
-	log := logf.Log.WithName("entrypoint")
-
 	// Get a config to talk to the apiserver
-	log.Info("setting up client for manager")
+	setupLog.Info("setting up client for manager")
 	cfg, err := config.GetConfig()
 	if err != nil {
-		log.Error(err, "unable to set up client config")
+		setupLog.Error(err, "unable to set up client config")
 		os.Exit(1)
 	}
 
 	// Create a new Cmd to provide shared dependencies and start components
-	log.Info("setting up manager")
+	setupLog.Info("setting up manager")
+	var webhookServer k8swebhook.Server
+	if *enableWebhooks {
+		webhookServer = k8swebhook.NewServer(k8swebhook.Options{
+			Port: 9443,
+		})
+	}
 	mgr, err := manager.New(cfg, manager.Options{
+		WebhookServer:           webhookServer,
 		LeaderElection:          *leaderElection,
 		LeaderElectionID:        *leaderElectionID,
 		LeaderElectionNamespace: *leaderElectionNamespace,
-		SyncPeriod:              syncPeriod,
+		Cache: cache.Options{
+			SyncPeriod:        syncPeriod,
+			DefaultNamespaces: core.BuildCacheDefaultNamespaces(*namespaces),
+		},
 	})
 	if err != nil {
-		log.Error(err, "unable to set up overall controller manager")
+		setupLog.Error(err, "unable to set up overall controller manager")
 		os.Exit(1)
 	}
 
-	log.Info("Registering Components.")
+	setupLog.Info("Registering Components.")
 
 	// Setup Scheme for all resources
-	log.Info("setting up scheme")
+	setupLog.Info("setting up scheme")
 	if err := apis.AddToScheme(mgr.GetScheme()); err != nil {
-		log.Error(err, "unable add APIs to scheme")
+		setupLog.Error(err, "unable add APIs to scheme")
 		os.Exit(1)
 	}
 
 	// Setup all Controllers
-	log.Info("Setting up controller")
+	setupLog.Info("Setting up controller")
 	if err := controller.AddToManager(mgr); err != nil {
-		log.Error(err, "unable to register controllers to the manager")
+		setupLog.Error(err, "unable to register controllers to the manager")
 		os.Exit(1)
 	}
+	if *enableWebhooks {
+		if err := deployment.AddDeploymentWebhook(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "Deployment")
+			os.Exit(1)
+		}
 
-	log.Info("setting up webhooks")
-	if err := webhook.AddToManager(mgr); err != nil {
-		log.Error(err, "unable to register webhooks to the manager")
-		os.Exit(1)
+		if err := statefulset.AddStatefulSetWebhook(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "StatefulSet")
+			os.Exit(1)
+		}
+
+		if err := daemonset.AddDaemonSetWebhook(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "DaemonSet")
+			os.Exit(1)
+		}
 	}
 
 	// Start the Cmd
-	log.Info("Starting the Cmd.")
+	setupLog.Info("Starting the Cmd.")
 	if err := mgr.Start(signals.SetupSignalHandler()); err != nil {
-		log.Error(err, "unable to run the manager")
+		setupLog.Error(err, "unable to run the manager")
 		os.Exit(1)
 	}
 }

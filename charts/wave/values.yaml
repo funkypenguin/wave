@@ -11,7 +11,7 @@ global:
 annotations: {}
 image:
   name: quay.io/wave-k8s/wave
-  tag: v0.5.0
+  tag: v0.8.0
   pullPolicy: IfNotPresent
 
 # Node selector for the wave pods
@@ -19,6 +19,10 @@ nodeSelector: {}
 
 # Replicas > 1 will enable leader election
 replicas: 1
+
+# Add PodDisruptionBudget which should be enabled for replicas > 1
+pdb:
+  enabled: false
 
 # Additional volumes to use in the pod.
 extraVolumes: []
@@ -43,6 +47,9 @@ serviceAccount:
   # If not set and create is true, a name is generated using the fullname template
   name:
 
+webhooks:
+  enabled: false
+
 # Period for reconciliation
 # syncPeriod: 5m
 
@@ -58,8 +65,14 @@ resources: {}
   #   cpu: 100m
   #   memory: 128Mi
 
+# node tolerations for wave pod
 tolerations: []
 
+# (anti-)affinity for wave pods
 affinity: {}
 
+# topologySpreadConstraints for the wave pods
+topologySpreadConstraints: []
+
+# extra annotations for wave pods
 podAnnotations: {}

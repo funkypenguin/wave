@@ -17,7 +17,7 @@ limitations under the License.
 package core
 
 import (
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/wave-k8s/wave/test/utils"
 	appsv1 "k8s.io/api/apps/v1"
@@ -25,28 +25,9 @@ import (
 
 var _ = Describe("Wave finalizer Suite", func() {
 	var deploymentObject *appsv1.Deployment
-	var podControllerDeployment podController
 
 	BeforeEach(func() {
 		deploymentObject = utils.ExampleDeployment.DeepCopy()
-		podControllerDeployment = &deployment{deploymentObject}
-	})
-
-	Context("addFinalizer", func() {
-		It("adds the wave finalizer to the deployment", func() {
-			addFinalizer(podControllerDeployment)
-
-			Expect(deploymentObject.GetFinalizers()).To(ContainElement(FinalizerString))
-		})
-
-		It("leaves existing finalizers in place", func() {
-			f := deploymentObject.GetFinalizers()
-			f = append(f, "kubernetes")
-			deploymentObject.SetFinalizers(f)
-			addFinalizer(podControllerDeployment)
-
-			Expect(deploymentObject.GetFinalizers()).To(ContainElement("kubernetes"))
-		})
 	})
 
 	Context("removeFinalizer", func() {
@@ -54,7 +35,7 @@ var _ = Describe("Wave finalizer Suite", func() {
 			f := deploymentObject.GetFinalizers()
 			f = append(f, FinalizerString)
 			deploymentObject.SetFinalizers(f)
-			removeFinalizer(podControllerDeployment)
+			removeFinalizer(deploymentObject)
 
 			Expect(deploymentObject.GetFinalizers()).NotTo(ContainElement(FinalizerString))
 		})
@@ -63,7 +44,7 @@ var _ = Describe("Wave finalizer Suite", func() {
 			f := deploymentObject.GetFinalizers()
 			f = append(f, "kubernetes")
 			deploymentObject.SetFinalizers(f)
-			removeFinalizer(podControllerDeployment)
+			removeFinalizer(deploymentObject)
 
 			Expect(deploymentObject.GetFinalizers()).To(ContainElement("kubernetes"))
 		})
@@ -75,18 +56,18 @@ var _ = Describe("Wave finalizer Suite", func() {
 			f = append(f, FinalizerString)
 			deploymentObject.SetFinalizers(f)
 
-			Expect(hasFinalizer(podControllerDeployment)).To(BeTrue())
+			Expect(hasFinalizer(deploymentObject)).To(BeTrue())
 		})
 
 		It("returns false if the deployment doesn't have the finalizer", func() {
 			// Test without any finalizers
-			Expect(hasFinalizer(podControllerDeployment)).To(BeFalse())
+			Expect(hasFinalizer(deploymentObject)).To(BeFalse())
 
 			// Test with a different finalizer
 			f := deploymentObject.GetFinalizers()
 			f = append(f, "kubernetes")
 			deploymentObject.SetFinalizers(f)
-			Expect(hasFinalizer(podControllerDeployment)).To(BeFalse())
+			Expect(hasFinalizer(deploymentObject)).To(BeFalse())
 		})
 	})
 })

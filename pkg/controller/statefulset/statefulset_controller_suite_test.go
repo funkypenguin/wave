@@ -17,74 +17,138 @@ limitations under the License.
 package statefulset
 
 import (
+	"context"
 	"log"
 	"path/filepath"
-	"sync"
 	"testing"
 
-	"github.com/wave-k8s/wave/test/reporters"
-
-	"github.com/go-logr/glogr"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/wave-k8s/wave/pkg/apis"
+	"github.com/wave-k8s/wave/pkg/core"
+	"github.com/wave-k8s/wave/test/utils"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+
+	admissionv1 "k8s.io/api/admissionregistration/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var cfg *rest.Config
 
 func TestMain(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecsWithDefaultAndCustomReporters(t, "Wave Controller Suite", reporters.Reporters())
+	RunSpecs(t, "Wave Controller Suite")
 }
 
 var t *envtest.Environment
 
+var testCtx, testCancel = context.WithCancel(context.Background())
+
+var requestsStart <-chan reconcile.Request
+var requests <-chan reconcile.Request
+
+var m utils.Matcher
+
 var _ = BeforeSuite(func() {
+	failurePolicy := admissionv1.Ignore
+	sideEffects := admissionv1.SideEffectClassNone
+	webhookPath := "/mutate-apps-v1-statefulset"
+	webhookInstallOptions := envtest.WebhookInstallOptions{
+		MutatingWebhooks: []*admissionv1.MutatingWebhookConfiguration{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "statefulset-operator",
+				},
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "MutatingWebhookConfiguration",
+					APIVersion: "admissionregistration.k8s.io/v1",
+				},
+				Webhooks: []admissionv1.MutatingWebhook{
+					{
+						Name:                    "statefulsets.wave.pusher.com",
+						AdmissionReviewVersions: []string{"v1"},
+						FailurePolicy:           &failurePolicy,
+						ClientConfig: admissionv1.WebhookClientConfig{
+							Service: &admissionv1.ServiceReference{
+								Path: &webhookPath,
+							},
+						},
+						Rules: []admissionv1.RuleWithOperations{
+							{
+								Operations: []admissionv1.OperationType{
+									admissionv1.Create,
+									admissionv1.Update,
+								},
+								Rule: admissionv1.Rule{
+									APIGroups:   []string{"apps"},
+									APIVersions: []string{"v1"},
+									Resources:   []string{"statefulsets"},
+								},
+							},
+						},
+						SideEffects: &sideEffects,
+					},
+				},
+			},
+		},
+	}
 	t = &envtest.Environment{
-		CRDDirectoryPaths: []string{filepath.Join("..", "..", "..", "config", "crds")},
+		WebhookInstallOptions: webhookInstallOptions,
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crds")},
 	}
 	apis.AddToScheme(scheme.Scheme)
 
-	logf.SetLogger(glogr.New())
+	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
 	var err error
 	if cfg, err = t.Start(); err != nil {
 		log.Fatal(err)
 	}
 
+	// Reset the Prometheus Registry before each test to avoid errors
+	metrics.Registry = prometheus.NewRegistry()
+
+	mgr, err := manager.New(cfg, manager.Options{
+		Metrics: metricsserver.Options{
+			BindAddress: "0",
+		},
+		WebhookServer: webhook.NewServer(webhook.Options{
+			Host:    (*t).WebhookInstallOptions.LocalServingHost,
+			Port:    (*t).WebhookInstallOptions.LocalServingPort,
+			CertDir: (*t).WebhookInstallOptions.LocalServingCertDir,
+		}),
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	c, cerr := client.New(cfg, client.Options{Scheme: scheme.Scheme})
+	Expect(cerr).NotTo(HaveOccurred())
+	m = utils.Matcher{Client: c}
+
+	var recFn reconcile.Reconciler
+	r := newReconciler(mgr)
+	recFn, requestsStart, requests = core.SetupControllerTestReconcile(r)
+	Expect(add(mgr, recFn, r.handler)).NotTo(HaveOccurred())
+
+	// register mutating pod webhook
+	err = AddStatefulSetWebhook(mgr)
+	Expect(err).ToNot(HaveOccurred())
+
+	testCtx, testCancel = context.WithCancel(context.Background())
+	go core.Run(testCtx, mgr)
 })
 
 var _ = AfterSuite(func() {
+	testCancel()
 	t.Stop()
 })
-
-// SetupTestReconcile returns a reconcile.Reconcile implementation that delegates to inner and
-// writes the request to requests after Reconcile is finished.
-func SetupTestReconcile(inner reconcile.Reconciler) (reconcile.Reconciler, chan reconcile.Request) {
-	requests := make(chan reconcile.Request)
-	fn := reconcile.Func(func(req reconcile.Request) (reconcile.Result, error) {
-		result, err := inner.Reconcile(req)
-		requests <- req
-		return result, err
-	})
-	return fn, requests
-}
-
-// StartTestManager adds recFn
-func StartTestManager(mgr manager.Manager) (chan struct{}, *sync.WaitGroup) {
-	stop := make(chan struct{})
-	wg := &sync.WaitGroup{}
-	wg.Add(1)
-	go func() {
-		defer GinkgoRecover()
-		Expect(mgr.Start(stop)).NotTo(HaveOccurred())
-		wg.Done()
-	}()
-	return stop, wg
-}

@@ -17,10 +17,13 @@ limitations under the License.
 package core
 
 import (
+	"context"
 	"sync"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/wave-k8s/wave/test/utils"
 	appsv1 "k8s.io/api/apps/v1"
@@ -33,10 +36,9 @@ import (
 
 var _ = Describe("Wave owner references Suite", func() {
 	var c client.Client
-	var h *Handler
+	var h *Handler[*appsv1.Deployment]
 	var m utils.Matcher
 	var deploymentObject *appsv1.Deployment
-	var podControllerDeployment podController
 	var mgrStopped *sync.WaitGroup
 	var stopMgr chan struct{}
 
@@ -53,13 +55,15 @@ var _ = Describe("Wave owner references Suite", func() {
 
 	BeforeEach(func() {
 		mgr, err := manager.New(cfg, manager.Options{
-			MetricsBindAddress: "0",
+			Metrics: metricsserver.Options{
+				BindAddress: "0",
+			},
 		})
 		Expect(err).NotTo(HaveOccurred())
 		var cerr error
 		c, cerr = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 		Expect(cerr).NotTo(HaveOccurred())
-		h = NewHandler(c, mgr.GetEventRecorderFor("wave"))
+		h = NewHandler[*appsv1.Deployment](c, mgr.GetEventRecorderFor("wave"))
 		m = utils.Matcher{Client: c}
 
 		// Create some configmaps and secrets
@@ -78,7 +82,6 @@ var _ = Describe("Wave owner references Suite", func() {
 		m.Create(s3).Should(Succeed())
 
 		deploymentObject = utils.ExampleDeployment.DeepCopy()
-		podControllerDeployment = &deployment{deploymentObject}
 
 		m.Create(deploymentObject).Should(Succeed())
 
@@ -107,22 +110,22 @@ var _ = Describe("Wave owner references Suite", func() {
 			for _, obj := range []Object{cm1, cm2, s1, s2} {
 				otherRef := ownerRef.DeepCopy()
 				otherRef.UID = obj.GetUID()
-				m.Update(obj, func(obj utils.Object) utils.Object {
+				m.Update(obj, func(obj client.Object) client.Object {
 					obj.SetOwnerReferences([]metav1.OwnerReference{ownerRef, *otherRef})
 					return obj
 				}, timeout).Should(Succeed())
 
-				m.Eventually(obj, timeout).Should(utils.WithOwnerReferences(ConsistOf(ownerRef, *otherRef)))
+				Eventually(obj, timeout).Should(utils.WithOwnerReferences(ConsistOf(ownerRef, *otherRef)))
 			}
 
 			children := []Object{cm1, s1}
-			err := h.removeOwnerReferences(podControllerDeployment, children)
+			err := h.removeOwnerReferences(deploymentObject, children)
 			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("removes owner references from the list of children given", func() {
-			m.Eventually(cm1, timeout).ShouldNot(utils.WithOwnerReferences(ContainElement(ownerRef)))
-			m.Eventually(s1, timeout).ShouldNot(utils.WithOwnerReferences(ContainElement(ownerRef)))
+			Eventually(cm1, timeout).ShouldNot(utils.WithOwnerReferences(ContainElement(ownerRef)))
+			Eventually(s1, timeout).ShouldNot(utils.WithOwnerReferences(ContainElement(ownerRef)))
 		})
 
 		It("doesn't remove owner references from children not listed", func() {
@@ -138,234 +141,23 @@ var _ = Describe("Wave owner references Suite", func() {
 		})
 
 		It("sends events for removing each owner reference", func() {
-			events := &corev1.EventList{}
 			cmMessage := "Removing watch for ConfigMap example1"
 			sMessage := "Removing watch for Secret example1"
 			eventMessage := func(event *corev1.Event) string {
 				return event.Message
 			}
 
-			m.Eventually(events, timeout).Should(utils.WithItems(ContainElement(WithTransform(eventMessage, Equal(cmMessage)))))
-			m.Eventually(events, timeout).Should(utils.WithItems(ContainElement(WithTransform(eventMessage, Equal(sMessage)))))
+			Eventually(func() *corev1.EventList {
+				events := &corev1.EventList{}
+				m.Client.List(context.TODO(), events)
+				return events
+			}, timeout).Should(utils.WithItems(ContainElement(WithTransform(eventMessage, Equal(cmMessage)))))
+			Eventually(func() *corev1.EventList {
+				events := &corev1.EventList{}
+				m.Client.List(context.TODO(), events)
+				return events
+			}, timeout).Should(utils.WithItems(ContainElement(WithTransform(eventMessage, Equal(sMessage)))))
 		})
 	})
 
-	Context("updateOwnerReferences", func() {
-		BeforeEach(func() {
-			for _, obj := range []Object{cm2, s1, s2} {
-				m.Update(obj, func(obj utils.Object) utils.Object {
-					obj.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
-					return obj
-				}, timeout).Should(Succeed())
-				m.Eventually(obj, timeout).Should(utils.WithOwnerReferences(ContainElement(ownerRef)))
-			}
-
-			existing := []Object{cm2, cm3, s1, s2}
-			current := []configObject{
-				{object: cm1, allKeys: true},
-				{object: s1, allKeys: true},
-				{object: s3, allKeys: false, keys: map[string]struct{}{
-					"key1": {},
-					"key2": {},
-				},
-				},
-			}
-			err := h.updateOwnerReferences(podControllerDeployment, existing, current)
-			Expect(err).NotTo(HaveOccurred())
-		})
-
-		It("removes owner references from those not in current", func() {
-			m.Eventually(cm2, timeout).ShouldNot(utils.WithOwnerReferences(ContainElement(ownerRef)))
-			m.Eventually(cm3, timeout).ShouldNot(utils.WithOwnerReferences(ContainElement(ownerRef)))
-			m.Eventually(s2, timeout).ShouldNot(utils.WithOwnerReferences(ContainElement(ownerRef)))
-		})
-
-		It("adds owner references to those in current", func() {
-			m.Eventually(cm1, timeout).Should(utils.WithOwnerReferences(ContainElement(ownerRef)))
-			m.Eventually(s1, timeout).Should(utils.WithOwnerReferences(ContainElement(ownerRef)))
-			m.Eventually(s3, timeout).Should(utils.WithOwnerReferences(ContainElement(ownerRef)))
-		})
-	})
-
-	Context("updateOwnerReference", func() {
-		BeforeEach(func() {
-			// Add an OwnerReference to cm2
-			m.Update(cm2, func(obj utils.Object) utils.Object {
-				cm2 := obj.(*corev1.ConfigMap)
-				cm2.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
-
-				return cm2
-			}, timeout).Should(Succeed())
-			m.Eventually(cm2, timeout).Should(utils.WithOwnerReferences(ContainElement(ownerRef)))
-
-			m.Get(cm1, timeout).Should(Succeed())
-			m.Get(cm2, timeout).Should(Succeed())
-		})
-
-		It("adds an OwnerReference if not present", func() {
-			// Add an OwnerReference to cm1
-			otherRef := ownerRef
-			otherRef.UID = cm1.GetUID()
-			m.Update(cm1, func(obj utils.Object) utils.Object {
-				cm1 := obj.(*corev1.ConfigMap)
-				cm1.SetOwnerReferences([]metav1.OwnerReference{otherRef})
-
-				return cm1
-			}, timeout).Should(Succeed())
-			m.Eventually(cm1, timeout).Should(utils.WithOwnerReferences(ContainElement(otherRef)))
-
-			m.Get(cm1, timeout).Should(Succeed())
-			Expect(h.updateOwnerReference(podControllerDeployment, cm1)).NotTo(HaveOccurred())
-			m.Eventually(cm1, timeout).Should(utils.WithOwnerReferences(ContainElement(ownerRef)))
-		})
-
-		It("doesn't update the child object if there is already and OwnerReference present", func() {
-			// Add an OwnerReference to cm2
-			m.Update(cm2, func(obj utils.Object) utils.Object {
-				cm2 := obj.(*corev1.ConfigMap)
-				cm2.SetOwnerReferences([]metav1.OwnerReference{ownerRef})
-
-				return cm2
-			}, timeout).Should(Succeed())
-			m.Eventually(cm2, timeout).Should(utils.WithOwnerReferences(ContainElement(ownerRef)))
-
-			// Get the original version
-			m.Get(cm2, timeout).Should(Succeed())
-			originalVersion := cm2.GetResourceVersion()
-			Expect(h.updateOwnerReference(podControllerDeployment, cm2)).NotTo(HaveOccurred())
-
-			// Compare current version
-			m.Get(cm2, timeout).Should(Succeed())
-			Expect(cm2.GetResourceVersion()).To(Equal(originalVersion))
-		})
-
-		It("sends events for adding each owner reference", func() {
-			m.Get(cm1, timeout).Should(Succeed())
-			Expect(h.updateOwnerReference(podControllerDeployment, cm1)).NotTo(HaveOccurred())
-			m.Eventually(cm1, timeout).Should(utils.WithOwnerReferences(ContainElement(ownerRef)))
-
-			events := &corev1.EventList{}
-			cmMessage := "Adding watch for ConfigMap example1"
-			eventMessage := func(event *corev1.Event) string {
-				return event.Message
-			}
-
-			m.Eventually(events, timeout).Should(utils.WithItems(ContainElement(WithTransform(eventMessage, Equal(cmMessage)))))
-		})
-	})
-
-	Context("getOrphans", func() {
-		It("returns an empty list when current and existing match", func() {
-			current := []configObject{
-				{object: cm1, allKeys: true},
-				{object: cm2, allKeys: true},
-				{object: s1, allKeys: true},
-				{object: s2, allKeys: true},
-			}
-			existing := []Object{cm1, cm2, s1, s2}
-			Expect(getOrphans(existing, current)).To(BeEmpty())
-		})
-
-		It("returns an empty list when existing is a subset of current", func() {
-			current := []configObject{
-				{object: cm1, allKeys: true},
-				{object: cm2, allKeys: true},
-				{object: s1, allKeys: true},
-				{object: s2, allKeys: true},
-			}
-			existing := []Object{cm1, s2}
-			Expect(getOrphans(existing, current)).To(BeEmpty())
-		})
-
-		It("returns the correct objects when current is a subset of existing", func() {
-			current := []configObject{
-				{object: cm1, allKeys: true},
-				{object: s2, allKeys: true},
-			}
-			existing := []Object{cm1, cm2, s1, s2}
-			orphans := getOrphans(existing, current)
-			Expect(orphans).To(ContainElement(cm2))
-			Expect(orphans).To(ContainElement(s1))
-		})
-
-		Context("when current contains multiple singleField entries", func() {
-			It("returns an empty list when current and existing match", func() {
-				current := []configObject{
-					{object: cm1, allKeys: true},
-					{object: cm2, allKeys: false, keys: map[string]struct{}{
-						"key1": {},
-						"key2": {},
-					},
-					},
-					{object: s1, allKeys: true},
-					{object: s2, allKeys: true},
-				}
-				existing := []Object{cm1, cm2, s1, s2}
-				Expect(getOrphans(existing, current)).To(BeEmpty())
-			})
-
-			It("returns an empty list when existing is a subset of current", func() {
-				current := []configObject{
-					{object: cm1, allKeys: true},
-					{object: cm2, allKeys: false, keys: map[string]struct{}{
-						"key1": {},
-						"key2": {},
-					},
-					},
-					{object: s1, allKeys: true},
-					{object: s2, allKeys: true},
-				}
-				existing := []Object{cm1, s2}
-				Expect(getOrphans(existing, current)).To(BeEmpty())
-			})
-
-			It("returns the correct objects when current is a subset of existing", func() {
-				current := []configObject{
-					{object: cm1, allKeys: true},
-					{object: s2, allKeys: false, keys: map[string]struct{}{
-						"key1": {},
-						"key2": {},
-					},
-					},
-				}
-				existing := []Object{cm1, cm2, s1, s2}
-				orphans := getOrphans(existing, current)
-				Expect(orphans).To(ContainElement(cm2))
-				Expect(orphans).To(ContainElement(s1))
-			})
-		})
-	})
-
-	Context("getOwnerReference", func() {
-		var ref metav1.OwnerReference
-		BeforeEach(func() {
-			ref = getOwnerReference(podControllerDeployment)
-		})
-
-		It("sets the APIVersion", func() {
-			Expect(ref.APIVersion).To(Equal("apps/v1"))
-		})
-
-		It("sets the Kind", func() {
-			Expect(ref.Kind).To(Equal("Deployment"))
-		})
-
-		It("sets the UID", func() {
-			Expect(ref.UID).To(Equal(deploymentObject.UID))
-		})
-
-		It("sets the Name", func() {
-			Expect(ref.Name).To(Equal(deploymentObject.Name))
-		})
-
-		It("sets Controller to false", func() {
-			Expect(ref.Controller).NotTo(BeNil())
-			Expect(*ref.Controller).To(BeFalse())
-		})
-
-		It("sets BlockOwnerDeletion to true", func() {
-			Expect(ref.BlockOwnerDeletion).NotTo(BeNil())
-			Expect(*ref.BlockOwnerDeletion).To(BeTrue())
-		})
-	})
 })

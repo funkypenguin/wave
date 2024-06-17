@@ -17,29 +17,29 @@ limitations under the License.
 package core
 
 import (
+	"context"
 	"log"
 	"path/filepath"
 	"sync"
 	"testing"
 
-	"github.com/go-logr/glogr"
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/wave-k8s/wave/pkg/apis"
-	"github.com/wave-k8s/wave/test/reporters"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
 )
 
 var cfg *rest.Config
 
 func TestMain(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecsWithDefaultAndCustomReporters(t, "Wave Controller Suite", reporters.Reporters())
+	RunSpecs(t, "Wave Controller Suite")
 }
 
 var t *envtest.Environment
@@ -50,7 +50,7 @@ var _ = BeforeSuite(func() {
 	}
 	apis.AddToScheme(scheme.Scheme)
 
-	logf.SetLogger(glogr.New())
+	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
 	var err error
 	if cfg, err = t.Start(); err != nil {
@@ -66,8 +66,8 @@ var _ = AfterSuite(func() {
 // writes the request to requests after Reconcile is finished.
 func SetupTestReconcile(inner reconcile.Reconciler) (reconcile.Reconciler, chan reconcile.Request) {
 	requests := make(chan reconcile.Request)
-	fn := reconcile.Func(func(req reconcile.Request) (reconcile.Result, error) {
-		result, err := inner.Reconcile(req)
+	fn := reconcile.Func(func(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
+		result, err := inner.Reconcile(ctx, req)
 		requests <- req
 		return result, err
 	})
@@ -79,10 +79,16 @@ func StartTestManager(mgr manager.Manager) (chan struct{}, *sync.WaitGroup) {
 	stop := make(chan struct{})
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		defer GinkgoRecover()
-		Expect(mgr.Start(stop)).NotTo(HaveOccurred())
-		wg.Done()
+		defer wg.Done()
+		Expect(mgr.Start(ctx)).NotTo(HaveOccurred())
+		cancel()
+	}()
+	go func() {
+		<-stop
+		cancel()
 	}()
 	return stop, wg
 }
