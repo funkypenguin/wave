@@ -3,9 +3,9 @@ GOBIN ?= $(shell $(GO) env GOPATH)/bin
 BINARY := wave
 VERSION := $(shell git describe --always --dirty --tags 2>/dev/null || echo "undefined")
 ECHO := echo
-CONTROLLER_TOOLS_VERSION ?= v0.15.0
-ENVTEST_K8S_VERSION ?= 1.30.0
-GOLANGCI_LINT_VERSION ?= v1.61.0
+CONTROLLER_TOOLS_VERSION ?= v0.19.0
+ENVTEST_K8S_VERSION ?= 1.34.0
+GOLANGCI_LINT_VERSION ?= v1.64.8
 
 ## Location to install dependencies to
 LOCALBIN ?= $(shell pwd)/bin

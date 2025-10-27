@@ -6,6 +6,7 @@ metadata:
 rules:
 - resources:
   - configmaps
+  - secrets
   verbs:
   - get
   - list
@@ -18,37 +19,11 @@ rules:
   - create
   - patch
   - update
-- resources:
-  - secrets
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - apps
   resources:
   - daemonsets
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - apps
-  resources:
   - deployments
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - apps
-  resources:
   - statefulsets
   verbs:
   - get
