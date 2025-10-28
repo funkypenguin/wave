@@ -44,6 +44,8 @@ else
 	helm install wave charts/wave --set image.name=wave-local --set image.tag=local
 fi
 
+while [ "$(kubectl get pods -n default | grep -cEv 'wave-wave')" -gt 1 ]; do echo Waiting for \"wave\” to be scheduled; sleep 10; done
+
 while [ "$(kubectl get pods -A | grep -cEv 'Running|Completed')" -gt 1 ]; do echo Waiting for \"cluster\" to start; sleep 10; done
 
 echo Creating test resources...
@@ -128,6 +130,8 @@ while ! kubectl get cm test-completed; do
   ctr=$((ctr+1))
   if [ "$ctr" -gt 60 ]; then
 	echo "Test failed"
+        kubectl get pods -A
+        kubectl get configmaps -A
 	exit 1
   fi
 done
