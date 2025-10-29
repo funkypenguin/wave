@@ -35,7 +35,7 @@ docker build -f ./Dockerfile -t wave-local:local .
 echo Installing wave...
 if [ "$1" = "production" ]; then
 	# Install cert-manager
-	kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
+	kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.3/cert-manager.yaml
 	while [ "$(kubectl get pods -n cert-manager | grep 'webhook' | grep -c '1/1')" -ne 1 ]; do echo Waiting for \"cert-manager-webhook\" to start; sleep 10; done
 	# Production setup
 	helm install wave charts/wave --set image.name=wave-local --set image.tag=local -f hack/production.yaml
@@ -43,6 +43,8 @@ else
 	# Default install without values
 	helm install wave charts/wave --set image.name=wave-local --set image.tag=local
 fi
+
+while [ "$(kubectl get pods -n default | grep -cEv 'wave-wave')" -gt 1 ]; do echo Waiting for \"wave\” to be scheduled; sleep 10; done
 
 while [ "$(kubectl get pods -A | grep -cEv 'Running|Completed')" -gt 1 ]; do echo Waiting for \"cluster\" to start; sleep 10; done
 
@@ -128,6 +130,8 @@ while ! kubectl get cm test-completed; do
   ctr=$((ctr+1))
   if [ "$ctr" -gt 60 ]; then
 	echo "Test failed"
+        kubectl get pods -A
+        kubectl get configmaps -A
 	exit 1
   fi
 done
